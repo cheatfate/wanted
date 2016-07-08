@@ -231,5 +231,3 @@ when isMainModule:
                            inBuffer.len)
   inBuffer.setLen(c)
   doAssert(inBuffer == outBuffer)
-
-
