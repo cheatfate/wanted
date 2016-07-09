@@ -8,7 +8,7 @@
 #
 
 import os, cpucores, asyncdispatch, nativesockets, strutils
-import asyncpipes, asyncutils
+import sharray, asyncpipes, asyncutils
 import processor
 
 when not compileOption("threads"):
@@ -17,7 +17,8 @@ when not compileOption("threads"):
 type
   acceptSetupImpl = object
     serverFd: AsyncFD
-    pipes: seq[tuple[pipe: AsyncPipe, count: int]]
+    pipesCount: int
+    pipes: SharedArray[tuple[pipe: AsyncPipe, count: int]]
   acceptSetup = ptr acceptSetupImpl
 
   workerSetupImpl = object
@@ -31,8 +32,10 @@ proc threadAccept(setup: pointer) {.thread.} =
   var index = 0
   # we need to register handles with our new dispatcher
   register(serverFd)
-  for item in setup.pipes:
-    register(item.pipe.AsyncFD)
+  var i = 0
+  while i < setup.pipesCount:
+    register(setup.pipes[i].pipe.AsyncFD)
+    inc(i)
 
   while true:
     var fut = serverFd.acceptAddress(regAsync = false)
@@ -42,7 +45,7 @@ proc threadAccept(setup: pointer) {.thread.} =
           var a = fut.read
           var csocket = a.client
           let item = setup.pipes[index]
-          index = ((index + 1) %% len(setup.pipes))
+          index = ((index + 1) %% setup.pipesCount)
           inc(count)
           let pipe = item.pipe.AsyncFD
           asyncCheck pipe.write(cast[pointer](addr csocket), sizeof(AsyncFD))
@@ -99,24 +102,27 @@ if cores == 1:
   workers = newSeq[Thread[pointer]](2)
   var aset = cast[acceptSetup](allocShared0(sizeof(acceptSetupImpl)))
   var wset = cast[workerSetup](allocShared0(sizeof(workerSetupImpl)))
-  aset.pipes = newSeq[tuple[pipe: AsyncPipe, count: int]]()
+  aset.pipes = allocSharedArray[tuple[pipe: AsyncPipe, count: int]](1)
   aset.serverFd = serverFd
   var pipes = asyncPipes(regAsync = false)
-  aset.pipes.add((pipe: pipes.writePipe, count: 0))
+  aset.pipes[0] = (pipe: pipes.writePipe, count: 0)
   wset.pipeFd = pipes.readPipe
   createThread(workers[1], threadWorker, cast[pointer](wset))
   createThread(workers[0], threadAccept, cast[pointer](aset))
 else:
-  workers = newSeq[Thread[pointer]]((cores - 1) * 2 + 1)
+  let threadsCount = (cores - 1) * 2 + 1
+  workers = newSeq[Thread[pointer]](threadsCount)
   var aset = cast[acceptSetup](allocShared0(sizeof(acceptSetupImpl)))
-  aset.pipes = newSeq[tuple[pipe: AsyncPipe, count: int]]()
+  aset.pipes = allocSharedArray[tuple[pipe: AsyncPipe,
+                                      count: int]](threadsCount)
+  aset.pipesCount = threadsCount
   aset.serverFd = serverFd
   var i = 1
   while i < len(workers):
     var pipes = asyncPipes(regAsync = false)
     var wset = cast[workerSetup](allocShared0(sizeof(workerSetupImpl)))
     wset.pipeFd = pipes.readPipe
-    aset.pipes.add((pipe: pipes.writePipe, count: 0))
+    aset.pipes[i - 1] = (pipe: pipes.writePipe, count: 0)
     createThread(workers[i], threadWorker, cast[pointer](wset))
     let ncpu = ((i - 1) div 2) + 1
     pinToCpu(workers[i], ncpu)
