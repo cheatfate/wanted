@@ -1,9 +1,9 @@
 #
 #
 #      Wanted asynchronous threaded webserver
-#        (c) Copyright 2016 Eugene Kabanov
+# (c) Copyright 2016 Dominik Picheta, Eugene Kabanov
 #
-#    See the file "copying.txt", included in this
+#      See the file "LICENSE", included in this
 #    distribution, for details about the copyright.
 #
 

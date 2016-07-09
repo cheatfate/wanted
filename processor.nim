@@ -3,13 +3,19 @@
 #      Wanted asynchronous threaded webserver
 #        (c) Copyright 2016 Dominik Picheta
 #
-#    See the file "copying.txt", included in this
+#      See the file "LICENSE", included in this
 #    distribution, for details about the copyright.
 #
 
 import asyncdispatch, asyncnet, httpcore, parseutils, uri, strutils
 
 type
+  partString = object
+
+  Request2* = object
+    client*: AsyncSocket
+
+
   Request* = object
     client*: AsyncSocket # TODO: Separate this into a Response object?
     reqMethod*: string
