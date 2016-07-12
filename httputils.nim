@@ -425,6 +425,9 @@ else:
             retFuture.fail(newException(OSError, osErrorMsg(lastError)))
         else:
           result = false # We still want this callback to be called.
+      elif res == 0:
+        helper.status = reqStatus.Disconnect
+        retFuture.complete()
       else:
         if processRequest(helper, res):
           retFuture.complete()

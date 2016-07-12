@@ -55,7 +55,6 @@ proc threadAccept(setup: pointer) {.thread.} =
 
 proc threadWorker(setup: pointer) {.thread.} =
   let setup = cast[workerSetup](setup)
-  let ncpu = setup.ncpu
   let pipeFd = setup.pipeFd
   var sock: SocketHandle = 0.SocketHandle
   let psock = cast[pointer](addr sock)
@@ -80,11 +79,7 @@ proc threadWorker(setup: pointer) {.thread.} =
         else:
           exitFlag = true
           break
-      echo("poll on cpu" & $ncpu)
-      let s = epochTime()
       poll()
-      var e = epochTime() - s
-      echo("cpu" & $ncpu & " " & $e)
     if exitFlag:
       break
 
