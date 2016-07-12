@@ -7,7 +7,7 @@
 #    distribution, for details about the copyright.
 #
 
-import os, cpucores, asyncdispatch, nativesockets, strutils
+import os, cpucores, asyncdispatch, nativesockets, strutils, net, times
 import sharray, asyncpipes, asyncutils
 import processor
 
@@ -22,7 +22,8 @@ type
   acceptSetup = ptr acceptSetupImpl
 
   workerSetupImpl = object
-    pipeFd: AsyncPipe
+    pipeFd*: AsyncPipe
+    ncpu*: int
   workerSetup = ptr workerSetupImpl
 
 proc threadAccept(setup: pointer) {.thread.} =
@@ -54,8 +55,9 @@ proc threadAccept(setup: pointer) {.thread.} =
 
 proc threadWorker(setup: pointer) {.thread.} =
   let setup = cast[workerSetup](setup)
+  let ncpu = setup.ncpu
   let pipeFd = setup.pipeFd
-  var sock: SocketHandle
+  var sock: SocketHandle = 0.SocketHandle
   let psock = cast[pointer](addr sock)
   var exitFlag = false
 
@@ -78,7 +80,11 @@ proc threadWorker(setup: pointer) {.thread.} =
         else:
           exitFlag = true
           break
+      echo("poll on cpu" & $ncpu)
+      let s = epochTime()
       poll()
+      var e = epochTime() - s
+      echo("cpu" & $ncpu & " " & $e)
     if exitFlag:
       break
 
@@ -114,17 +120,19 @@ else:
   workers = newSeq[Thread[pointer]](threadsCount)
   var aset = cast[acceptSetup](allocShared0(sizeof(acceptSetupImpl)))
   aset.pipes = allocSharedArray[tuple[pipe: AsyncPipe,
-                                      count: int]](threadsCount)
-  aset.pipesCount = threadsCount
+                                      count: int]](threadsCount - 1)
+  aset.pipesCount = threadsCount - 1
   aset.serverFd = serverFd
   var i = 1
   while i < len(workers):
+    let ncpu = ((i - 1) div 2) + 1
     var pipes = asyncPipes(regAsync = false)
     var wset = cast[workerSetup](allocShared0(sizeof(workerSetupImpl)))
     wset.pipeFd = pipes.readPipe
+    wset.ncpu = ncpu
     aset.pipes[i - 1] = (pipe: pipes.writePipe, count: 0)
     createThread(workers[i], threadWorker, cast[pointer](wset))
-    let ncpu = ((i - 1) div 2) + 1
+    
     pinToCpu(workers[i], ncpu)
     echo "Started threadWorker with pinned to CPU" & $ncpu
     inc(i)
