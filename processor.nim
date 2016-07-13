@@ -8,15 +8,7 @@
 #
 
 import asyncdispatch, httputils, strutils, strtabs, uri
-
-type
-  Request* = object
-    sock*: AsyncFd
-    rmethod*: HttpMethod
-    version*: HttpVersion
-    url*: Uri
-    headers*: StringTableRef
-    helper: ReqHelper
+import request
 
 proc respond*(fd: AsyncFd, version: HttpVersion, code: HttpCode,
               content: string, headers: StringTableRef = nil): Future[void] =
@@ -47,21 +39,6 @@ proc sendTest(req: Request) {.async.} =
   let headers = {"Date": "Tue, 29 Apr 2014 23:40:08 GMT",
                  "Content-type": "text/plain; charset=utf-8"}
   await req.respond(Http200, "Hello World", headers.newHttpHeaders())
-
-proc newRequest(fd: AsyncFd): Request =
-  result = Request()
-  result.sock = fd
-  result.helper = newReqHelper()
-  result.headers = newStringTable(modeCaseInsensitive)
-
-proc clear(r: var Request) =
-  clear(r.helper)
-  r.headers.clear(modeCaseInsensitive)
-
-proc close(r: var Request) =
-  closeSocket(r.sock)
-  free(r.helper)
-  r.sock = 0.AsyncFd
 
 proc processClient*(fd: AsyncFd): Future[void] {.async.} =
   var err = false
