@@ -6,10 +6,7 @@
 #      See the file "LICENSE", included in this
 #    distribution, for details about the copyright.
 #
-import asyncdispatch, uri, os, net, strtabs
-
-const
-  MAXIMUM_HTTP_REQUEST_SIZE = 8192
+import asyncdispatch, uri, os, net, strtabs, constants
 
 type
   HttpCode* = enum
@@ -92,7 +89,7 @@ type
     length: int32
 
   ReqHelperImpl* = object
-    buffer*: array[MAXIMUM_HTTP_REQUEST_SIZE, char]
+    buffer*: array[MaxHttpRequestSize, char]
     parts*: array[4, partString]
     size*: int
     offset*: int
@@ -208,7 +205,7 @@ proc processRequest*(helper: ReqHelper, dataReceived: int): bool =
   result = false
   helper.size = helper.size - dataReceived
   assert(helper.size >= 0)
-  let availSize = MAXIMUM_HTTP_REQUEST_SIZE - helper.size
+  let availSize = MaxHttpRequestSize - helper.size
 
   while true:
     var offset = helper.offset
@@ -312,13 +309,13 @@ proc processRequest*(helper: ReqHelper, dataReceived: int): bool =
     else:
       break
 
-  if not result and helper.offset == MAXIMUM_HTTP_REQUEST_SIZE:
+  if not result and helper.offset == MaxHttpRequestSize:
     helper.status = reqStatus.SizeError
     result = true
 
 proc newReqHelper*(): ReqHelper =
   result = cast[ReqHelper](allocShared0(sizeof(ReqHelperImpl)))
-  result.size = MAXIMUM_HTTP_REQUEST_SIZE
+  result.size = MaxHttpRequestSize
 
 proc free*(r: ReqHelper) =
   deallocShared(r)
@@ -332,7 +329,7 @@ proc clear*(r: ReqHelper) =
   r.parts[2].index = 0
   r.parts[3].index = 0
   r.status = InProgress
-  r.size = MAXIMUM_HTTP_REQUEST_SIZE
+  r.size = MaxHttpRequestSize
 
 template getPointer*(r: ReqHelper): pointer =
   (addr(r.buffer[r.offset]))

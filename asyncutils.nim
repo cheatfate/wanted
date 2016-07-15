@@ -16,7 +16,7 @@ when defined(windows):
   var getAcceptExSockAddrs*: WSAPROC_GETACCEPTEXSOCKADDRS
 
   proc initPointer(s: SocketHandle, fun: var pointer, guid: var GUID): bool =
-    var bytesRet: Dword
+    var bytesRet = 0.Dword
     fun = nil
     result = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, addr guid,
                       sizeof(GUID).Dword, addr fun, sizeof(pointer).Dword,
@@ -45,7 +45,7 @@ when defined(windows):
 
     const lpOutputLen = 1024
     var lpOutputBuf = newString(lpOutputLen)
-    var dwBytesReceived: Dword
+    var dwBytesReceived = 0.Dword
     let dwReceiveDataLength = 0.Dword # We don't want any data to be read.
     let dwLocalAddressLength = Dword(sizeof (Sockaddr_in) + 16)
     let dwRemoteAddressLength = Dword(sizeof(Sockaddr_in) + 16)

@@ -8,28 +8,20 @@
 #
 
 import os, cpucores, asyncdispatch, nativesockets, strutils, net, times
-import sharray, asyncpipes, asyncutils, httputils
-import request, response, processor
+import sharray, asyncpipes, asyncutils, httputils, strtabs
+import reqresp, processor
 
 when not compileOption("threads"):
   {.error: "Threads support must be turned on".}
 
 type
-  middleSet* = proc(request: Request, name: string,
-                    value: pointer): bool {.gcsafe.}
-  middleGet* = proc(request: Request, name: string,
-                    value: pointer): bool {.gcsafe.}
-  middleProc* = proc(request: Request): bool {.gcsafe.}
-
-  middleWare* = object
-    procCb*: middleProc
-    getCb*: middleGet
-    setCb*: middleSet
+  requestHandler* = proc (req: Request): Future[Response]
 
   workerSetupImpl = object
     pipeFd: AsyncPipe
     ncpu: int
-    middlewares: SharedArray[middleWare]
+    middlewares: SharedArray[Middleware]
+    handler: wrappedHandler
   workerSetup = ptr workerSetupImpl
 
   acceptSetupImpl = object
@@ -43,8 +35,9 @@ type
     serverFd: AsyncFD
     stopPipe: AsyncPipe
     workers: seq[Thread[pointer]]
-    middlewares: SharedArray[middleWare]
+    middlewares: SharedArray[Middleware]
     pipes: seq[AsyncPipe]
+    handler: wrappedHandler
 
 proc threadAccept(setup: pointer) {.thread.} =
   let setup = cast[acceptSetup](setup)
@@ -58,20 +51,22 @@ proc threadAccept(setup: pointer) {.thread.} =
 
   # we need to register handles with our new dispatcher
   register(serverFd)
-  register(stopFd)
+  register(AsyncFD(stopFd))
   var i = 0
   while i < setup.pipesCount:
     register(setup.pipes[i].pipe.AsyncFD)
     inc(i)
 
+  # main accept loop
   while not exitFlag:
-    var stopfut = stopFd.readInto(addr data, sizeof(int))
-    var fut = serverFd.acceptAddress(regAsync = false)
+    var stopFut = stopFd.readInto(addr data, sizeof(int))
+    var acptFut = serverFd.acceptAddress(regAsync = false)
     while true:
-      if stopfut.finished:
-        if not stopfut.failed:
+      if stopFut.finished:
+        # server.stop() is called
+        if not stopFut.failed:
           # graceful shutdown
-          var a = stopfut.read
+          var a = stopFut.read
           if a == sizeof(int) and data == 1:
             i = 0
             while i < setup.pipesCount:
@@ -82,9 +77,10 @@ proc threadAccept(setup: pointer) {.thread.} =
               inc(i)
             exitFlag = true
             break
-      if fut.finished:
-        if not fut.failed:
-          var a = fut.read
+      if acptFut.finished:
+        # new client accepted
+        if not acptFut.failed:
+          var a = acptFut.read
           var csocket = a.client
           let item = setup.pipes[index]
           index = ((index + 1) %% setup.pipesCount)
@@ -106,14 +102,16 @@ proc threadWorker(setup: pointer) {.thread.} =
   var sock: SocketHandle = 0.SocketHandle
   let psock = cast[pointer](addr sock)
   var exitFlag = false
-
+  # we need to register handles with our new dispatcher
   register(pipeFd)
+
+  # main worker loop
   while not exitFlag:
-    var pfut = pipeFd.readInto(psock, sizeof(SocketHandle))
+    var pipeFut = pipeFd.readInto(psock, sizeof(SocketHandle))
     while true:
-      if pfut.finished:
-        if not pfut.failed:
-          var size = pfut.read()
+      if pipeFut.finished:
+        if not pipeFut.failed:
+          var size = pipeFut.read()
           if size == sizeof(SocketHandle):
             if sock == SocketHandle(-1):
               # graceful shutdown
@@ -126,7 +124,8 @@ proc threadWorker(setup: pointer) {.thread.} =
             # we got normal socket, so we can register with our dispatcher
             register(sock.AsyncFD)
             # and now we start processing client
-            asyncCheck processClient(sock.AsyncFD)
+            asyncCheck processClient(sock.AsyncFD, setup.handler,
+                                     setup.middlewares)
             break
           else:
             exitFlag = true
@@ -136,9 +135,18 @@ proc threadWorker(setup: pointer) {.thread.} =
           break
       poll()
 
-proc newWantedServer*(address: string, port: Port,
-                     middlewares: varargs[middleWare]): wantedServer =
+proc wrapHandle*(procb: requestHandler): auto =
+  proc handler(req: Request): Future[Response] {.async.} =
+    try:
+      result = await procb(req)
+    except:
+      discard
+  result = handler
+
+proc newWantedServer*(address: string, port: Port, handler: requestHandler,
+                      middlewares: varargs[Middleware]): wantedServer =
   let fd = newNativeSocket()
+  setBlocking(fd, false)
   setSockOptInt(fd, SOL_SOCKET, SO_REUSEADDR, 1)
   var saddress = ""
   if len(address) == 0:
@@ -152,18 +160,18 @@ proc newWantedServer*(address: string, port: Port,
   dealloc(aiList)
   if listen(fd) != 0:
     raiseOSError(osLastError())
-  setBlocking(fd, false)
   result = wantedServer()
   result.serverFd = fd.AsyncFD
   if len(middlewares) > 0:
-    result.middlewares = allocSharedArray[middleWare](len(middlewares) + 1)
+    result.middlewares = allocSharedArray[Middleware](len(middlewares) + 1)
     var i = 0
     for mw in items(middlewares):
-      doAssert(mw.procCb != nil and mw.setCb != nil and mw.getCb != nil)
+      doAssert(mw.factory != nil)
       result.middlewares[i] = mw
       inc(i)
   result.workers = newSeq[Thread[pointer]]()
   result.pipes = newSeq[AsyncPipe]()
+  result.handler = wrapHandle(handler)
 
 proc start*(ws: wantedServer) =
   var cores = getCoresNumber()
@@ -173,13 +181,17 @@ proc start*(ws: wantedServer) =
     var wset = cast[workerSetup](allocShared0(sizeof(workerSetupImpl)))
     var stopipes = asyncPipes(regAsync = false)
     var pipes = asyncPipes(regAsync = false)
+    # fill acceptSetup
     aset.pipes = allocSharedArray[tuple[pipe: AsyncPipe, count: int]](1)
     aset.serverFd = ws.serverFd
     aset.pipes[0] = (pipe: pipes.writePipe, count: 0)
+    aset.stopPipe = stopipes.readPipe
+    # fill workerSetup
     wset.pipeFd = pipes.readPipe
     wset.middlewares = ws.middlewares
+    wset.handler = ws.handler
+    # update server setup
     ws.workers.setLen(2)
-    aset.stopPipe = stopipes.readPipe
     ws.stopPipe = stopipes.writePipe
     ws.pipes.add(pipes.writePipe)
     createThread(ws.workers[1], threadWorker, cast[pointer](wset))
@@ -189,10 +201,13 @@ proc start*(ws: wantedServer) =
     let threadsCount = (cores - 1) * 2 + 1
     ws.workers.setLen(threadsCount)
     var aset = cast[acceptSetup](allocShared0(sizeof(acceptSetupImpl)))
+    var stopipes = asyncPipes(regAsync = false)
     aset.pipes = allocSharedArray[tuple[pipe: AsyncPipe,
                                         count: int]](threadsCount - 1)
     aset.pipesCount = threadsCount - 1
     aset.serverFd = ws.serverFd
+    aset.stopPipe = stopipes.readPipe
+    ws.stopPipe = stopipes.writePipe
     var i = 1
     while i < len(ws.workers):
       let ncpu = ((i - 1) div 2) + 1
@@ -202,9 +217,9 @@ proc start*(ws: wantedServer) =
       wset.pipeFd = pipes.readPipe
       wset.ncpu = ncpu
       wset.middlewares = ws.middlewares
+      wset.handler = ws.handler
       # set acceptThread parameters
       aset.pipes[i - 1] = (pipe: pipes.writePipe, count: 0)
-
       ws.pipes.add(pipes.writePipe)
       # starting and pinning thread
       createThread(ws.workers[i], threadWorker, cast[pointer](wset))
@@ -227,7 +242,14 @@ proc running*(ws: var wantedServer): bool {.inline.} =
   result = ws.workers[0].running()
 
 when not defined(testing) and isMainModule:
-  var server = newWantedServer("", Port(5555))
+  import middlewares/session
+  proc sendTest(req: Request): Future[Response] {.async.} =
+    result = newResponse(req, Http200)
+    result.headers["Date"] = "Tue, 29 Apr 2014 23:40:08 GMT"
+    result.headers["Content-Type"] = "text/plain; charset=utf-8"
+    await result.writeText("Hello World!")
+
+  var server = newWantedServer("", Port(5555), sendTest, sessionMiddleware())
   server.start()
   server.join()
 

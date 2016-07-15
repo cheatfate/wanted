@@ -33,12 +33,8 @@ when defined(windows):
     var pipeName: WideCString
     var pipeIn: Handle
     var pipeOut: Handle
-    var sa: SECURITY_ATTRIBUTES
-
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES).cint
-    sa.lpSecurityDescriptor = nil
-    sa.bInheritHandle = 1
-
+    var sa = SECURITY_ATTRIBUTES(nLength: sizeof(SECURITY_ATTRIBUTES).cint,
+                                 lpSecurityDescriptor: nil, bInheritHandle: 1)
     while true:
       QueryPerformanceCounter(number)
       let p = r"\\.\pipe\asyncpipe_" & $number

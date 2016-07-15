@@ -8,72 +8,48 @@
 #
 
 import asyncdispatch, httputils, strutils, strtabs, uri
-import request
+import sharray, reqresp, constants
 
-proc respond*(fd: AsyncFd, version: HttpVersion, code: HttpCode,
-              content: string, headers: StringTableRef = nil): Future[void] =
-  var msg = "HTTP/1."
-  case version
-  of HttpVer11:
-    msg = msg & "1 " & $code & "\c\L"
-  else:
-    msg = msg & "0 " & $code & "\c\L"
-  if headers != nil:
-    for k, v in headers:
-      msg.add(k & ": " & v & "\c\L")
-  msg.add("Content-Length: " & $content.len & "\c\L\c\L")
-  msg.add(content)
-  result = send(fd, msg)
-
-proc newHttpHeaders*(kvp: openarray[tuple[key: string,
-                                          val: string]]): StringTableRef =
-  result = newStringTable(modeCaseInsensitive)
-  for pair in kvp:
-    result[pair.key] = pair.val
-
-proc respond*(req: Request, code: HttpCode, content: string,
-              headers: StringTableRef = nil): Future[void] =
-  result = req.sock.respond(req.version, code, content, headers)
-
-proc sendTest(req: Request) {.async.} =
-  let headers = {"Date": "Tue, 29 Apr 2014 23:40:08 GMT",
-                 "Content-type": "text/plain; charset=utf-8"}
-  await req.respond(Http200, "Hello World", headers.newHttpHeaders())
-
-proc processClient*(fd: AsyncFd): Future[void] {.async.} =
+proc processClient*(fd: AsyncFd, handler: wrappedHandler,
+                    middlewares: SharedArray[Middleware]):
+                    Future[void] {.async.} =
   var err = false
   var request = newRequest(fd)
+  var response = newResponse(request)
   while true:
-    request.sock = fd
+    # receiving data from client and sanitizing it
     var helpfut = recvRequestInto(request.sock, request.helper)
     yield helpfut
     if helpfut.failed:
+      await response.writeError(Http500, $Http500)
       break
 
+    # processing helper results
     let helper = request.helper
-
     if helper.status != reqStatus.Ok:
       case helper.status
       of SizeError:
-        await respond(fd, HttpVer10, Http413, $Http413)
+        await response.writeError(Http413, $Http413)
       of ReqMethodError, VersionError, HeadersError:
-        await respond(fd, HttpVer10, Http400, $Http400)
+        await response.writeError(Http400, $Http400)
       of Disconnect:
         discard
       else:
-        await respond(fd, HttpVer10, Http400, $Http400)
+        await response.writeError(Http400, $Http400)
       break
 
     # processing request method
     request.rmethod = helper.getMethod()
     if request.rmethod == MethodError:
-      await respond(fd, HttpVer10, Http400, $Http400)
+      await response.writeError(Http400, $Http400)
       break
     # processing request version
     request.version = helper.getVersion()
     if request.version == HttpVerError:
-      await respond(fd, HttpVer10, Http400, $Http400)
+      await response.writeError(Http400, $Http400)
       break
+    # set response version equal to request version
+    response.version = request.version
     # processing request uri
     request.url = initUri()
     let uri = helper.getUrl()
@@ -82,19 +58,48 @@ proc processClient*(fd: AsyncFd): Future[void] {.async.} =
     except:
       err = true
     if err:
-      await respond(fd, request.version, Http400, $Http400)
+      await response.writeError(Http400, $Http400)
       break
     # processing headers
     if not helper.getHeaders(request.headers):
-      await respond(fd, request.version, Http400, $Http400)
+      await response.writeError(Http400, $Http400)
       break
 
-    #
-    # processing request here
-    #
+    # processing request
+    err = false
+    var curHandler = handler
+    if middlewares != nil:
+      # middlewares present
+      var i = 0
+      while not err:
+        let factoryCb = middlewares[i].factory
+        if factoryCb == nil: break
+        var handlerFut = factoryCb(curHandler)
+        yield handlerFut
+        if handlerFut.failed:
+          await response.writeError(Http500, $Http500)
+          err = true
+          break
+        else:
+          curHandler = handlerFut.read()
+        inc(i)
+      if err: break
 
-    await request.sendTest()
+    var respFut = curHandler(request)
+    yield respFut
+    if respFut.finished:
+      if respFut.failed:
+        await response.writeError(Http500, $Http500)
+        break
+      else:
+        response = respFut.read()
 
+    # if response is not finished send error
+    if not response.finished():
+      await response.writeError(Http500, $Http500)
+      break
+
+    # processing connection behavior
     if (request.version == HttpVer11 and
        request.headers.getOrDefault("connection").normalize != "close") or
        (request.version == HttpVer10 and
